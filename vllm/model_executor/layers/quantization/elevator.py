@@ -8,6 +8,8 @@ from vllm.model_executor.layers.quantization.base_config import QuantizationConf
 from vllm.model_executor.parameter import PackedvLLMParameter, RowvLLMParameter, GroupQuantScaleParameter
 
 import elevator
+import json
+import os
 
 logger = init_logger(__name__)
 
@@ -46,7 +48,7 @@ class ElevatorConfig(QuantizationConfig):
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["ElevatorLinearMethod"]:
         if isinstance(layer, LinearBase):
-            return ElevatorLinearMethod(self)
+            return ElevatorLinearMethod(self, prefix)
         return None
     
     def get_name(self) -> str:
@@ -65,8 +67,12 @@ class ElevatorLinearMethod(LinearMethodBase):
         quant_config: The Elevator quantization config.
     """
 
-    def __init__(self, quant_config: ElevatorConfig):
+    def __init__(self, quant_config: ElevatorConfig, prefix: str):
         self.quant_config = quant_config
+        self.prefix = prefix
+        self.kernel_config = json.load(open("best_config.json", "r"))
+        for key in self.kernel_config:
+            self.kernel_config[key]["args"] = json.loads(self.kernel_config[key]["args"])
     
     def create_weights(
         self,
@@ -134,31 +140,31 @@ class ElevatorLinearMethod(LinearMethodBase):
         layer.register_parameter("qzeros", qzeros)
     
     def process_weights_after_loading(self, layer: torch.nn.Module):
+        print(self.prefix)
         input_size = layer.qweight.shape[0] * self.quant_config.pack_factor
         output_size = layer.qweight.shape[1]
         device = layer.qweight.device
 
-        row_idx = torch.arange(input_size, device=device, dtype=torch.int32) // self.quant_config.pack_factor
-        row_offset = torch.arange(input_size, device=device, dtype=torch.int32) % self.quant_config.pack_factor
-        mask = (1 << self.quant_config.weight_bits) - 1
-        qweight_uncompressed = (layer.qweight[row_idx] >> (row_offset * self.quant_config.weight_bits).unsqueeze(1)) & mask
+        if os.path.exists(f".elevator_linears/{self.prefix}.pt"):
+            qweight_uncompressed, qzeros_uncompressed = torch.load(f".elevator_linears/{self.prefix}.pt", weights_only=True)
+        else:
+            row_idx = torch.arange(input_size, device=device, dtype=torch.int32) // self.quant_config.pack_factor
+            row_offset = torch.arange(input_size, device=device, dtype=torch.int32) % self.quant_config.pack_factor
+            mask = (1 << self.quant_config.weight_bits) - 1
+            qweight_uncompressed = (layer.qweight[row_idx] >> (row_offset * self.quant_config.weight_bits).unsqueeze(1)) & mask
 
-        col_idx = torch.arange(output_size, device=device, dtype=torch.int32) // self.quant_config.pack_factor
-        col_offset = torch.arange(output_size, device=device, dtype=torch.int32) % self.quant_config.pack_factor
-        qzeros_uncompressed = (layer.qzeros[:, col_idx] >> (col_offset * self.quant_config.weight_bits).unsqueeze(0)) & mask
+            col_idx = torch.arange(output_size, device=device, dtype=torch.int32) // self.quant_config.pack_factor
+            col_offset = torch.arange(output_size, device=device, dtype=torch.int32) % self.quant_config.pack_factor
+            qzeros_uncompressed = (layer.qzeros[:, col_idx] >> (col_offset * self.quant_config.weight_bits).unsqueeze(0)) & mask
 
-        kernel_name = "gptq_gemv"
-        template_args = {
-            "K": input_size,
-            "N": output_size,
-            "GS": self.quant_config.group_size,
-            "BLOCK_N": 1,
-            "BLOCK_SIZE": 32,
-        }
+            os.makedirs(".elevator_linears", exist_ok=True)
+            torch.save((qweight_uncompressed, qzeros_uncompressed), f".elevator_linears/{self.prefix}.pt")
+
+        config = self.kernel_config[f"1-{output_size}-{input_size}-{self.quant_config.group_size}"]
 
         layer.elevator_linear = elevator.auto_get_layer(
-            kernel_name=kernel_name,
-            template_args=template_args,
+            kernel_name=config["kernel"],
+            template_args=config["args"],
             init_params=(
                 qweight_uncompressed,
                 layer.scales,
