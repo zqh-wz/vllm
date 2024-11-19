@@ -173,6 +173,9 @@ class ElevatorLinearMethod(LinearMethodBase):
             device=device,
         )
 
+        layer.register_parameter("qweight", None)
+        layer.register_parameter("qzeros", None)
+
     def apply(self,
               layer: torch.nn.Module,
               x: torch.Tensor,
