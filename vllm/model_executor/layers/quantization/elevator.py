@@ -141,7 +141,7 @@ class ElevatorLinearMethod(LinearMethodBase):
     
     def process_weights_after_loading(self, layer: torch.nn.Module):
         print(self.prefix)
-        cache_path = f".elevator_linears/{self.prefix}.pt"
+        cache_path = f"{os.getenv('CACHE_PREFIX')}/{self.prefix}.pt"
         input_size = layer.qweight.shape[0] * self.quant_config.pack_factor
         output_size = layer.qweight.shape[1]
         device = layer.qweight.device
@@ -167,7 +167,7 @@ class ElevatorLinearMethod(LinearMethodBase):
             col_offset = torch.arange(output_size, device=device, dtype=torch.int32) % self.quant_config.pack_factor
             qzeros_uncompressed = (layer.qzeros[:, col_idx] >> (col_offset * self.quant_config.weight_bits).unsqueeze(0)) & mask
 
-            os.makedirs(".elevator_linears", exist_ok=True)
+            os.makedirs(os.getenv('CACHE_PREFIX'), exist_ok=True)
             layer.elevator_linear = elevator.auto_get_layer(
                 kernel_name=elevator_kernel_config["kernel"],
                 template_args=elevator_kernel_config["args"],
