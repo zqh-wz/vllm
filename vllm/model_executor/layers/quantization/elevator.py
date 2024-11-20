@@ -189,4 +189,7 @@ class ElevatorLinearMethod(LinearMethodBase):
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Apply the weights in layer to the input tensor.
         Expects create_weights to have been called before on the layer."""
-        return layer.elevator_linear(x)
+        out = layer.elevator_linear(x)
+        if bias is not None:
+            out.add_(bias)
+        return out
