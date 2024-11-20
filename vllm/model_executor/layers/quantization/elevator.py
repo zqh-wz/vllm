@@ -141,12 +141,22 @@ class ElevatorLinearMethod(LinearMethodBase):
     
     def process_weights_after_loading(self, layer: torch.nn.Module):
         print(self.prefix)
+        cache_path = f".elevator_linears/{self.prefix}.pt"
         input_size = layer.qweight.shape[0] * self.quant_config.pack_factor
         output_size = layer.qweight.shape[1]
         device = layer.qweight.device
 
-        if os.path.exists(f".elevator_linears/{self.prefix}.pt"):
-            qweight_uncompressed, qzeros_uncompressed = torch.load(f".elevator_linears/{self.prefix}.pt", weights_only=True)
+        elevator_kernel_config = self.kernel_config[f"1-{output_size}-{input_size}-{self.quant_config.group_size}"]
+
+        if os.path.exists(cache_path):
+            layer.elevator_linear = elevator.qlinear.GPTQLinear(
+                in_features=input_size,
+                out_features=output_size,
+                group_size=self.quant_config.group_size,
+                bias=False,
+                load_dir=cache_path
+            )
+            layer.elevator_linear.set_kernel(elevator_kernel_config["kernel"], elevator_kernel_config["args"])
         else:
             row_idx = torch.arange(input_size, device=device, dtype=torch.int32) // self.quant_config.pack_factor
             row_offset = torch.arange(input_size, device=device, dtype=torch.int32) % self.quant_config.pack_factor
@@ -158,20 +168,17 @@ class ElevatorLinearMethod(LinearMethodBase):
             qzeros_uncompressed = (layer.qzeros[:, col_idx] >> (col_offset * self.quant_config.weight_bits).unsqueeze(0)) & mask
 
             os.makedirs(".elevator_linears", exist_ok=True)
-            torch.save((qweight_uncompressed, qzeros_uncompressed), f".elevator_linears/{self.prefix}.pt")
-
-        config = self.kernel_config[f"1-{output_size}-{input_size}-{self.quant_config.group_size}"]
-
-        layer.elevator_linear = elevator.auto_get_layer(
-            kernel_name=config["kernel"],
-            template_args=config["args"],
-            init_params=(
-                qweight_uncompressed,
-                layer.scales,
-                qzeros_uncompressed,
-            ),
-            device=device,
-        )
+            layer.elevator_linear = elevator.auto_get_layer(
+                kernel_name=elevator_kernel_config["kernel"],
+                template_args=elevator_kernel_config["args"],
+                init_params=(
+                    qweight_uncompressed,
+                    layer.scales,
+                    qzeros_uncompressed,
+                ),
+                device=device,
+            )
+            layer.elevator_linear.dump(cache_path)
 
         layer.register_parameter("qweight", None)
         layer.register_parameter("qzeros", None)
